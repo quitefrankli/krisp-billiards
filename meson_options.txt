@@ -1,0 +1,1 @@
+option('krisp_runtime_directory', type: 'string', description: 'Krisp runtime source directory supplied by Conan')
