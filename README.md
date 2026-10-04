@@ -37,11 +37,12 @@ For a cached checkpoint, follow the package command in Krisp’s `docs/CONAN.md`
 
 ## Scene loading
 
-Billiards recreates its procedural rigid bodies after loading a scene because
-Krisp currently serializes gravity but not rigid-body definitions or velocities.
-Loaded positions and pocketed balls are restored; motion resumes from rest.
-Reset Rack restores the initial layout. This callback uses the named Billiards
-objects, so loading another application's scene is unsupported.
+Billiards saves the object IDs for its playing surface, table, rails, cue, and
+balls, along with each ball's pocketed state and reset position. Scene loading
+uses those IDs after Krisp restores objects and physics, so edited display names
+do not affect gameplay state. Physics bodies, velocities, and sleep state are
+restored by Krisp before the app refreshes its transient input and UI state.
+Reset Rack restores the saved initial positions.
 
 When switching between editable and cached Krisp, clear Meson's dependency cache:
 
@@ -54,7 +55,7 @@ meson setup build/debug --reconfigure --clearcache \
 
 ## Regression check
 
-With Xvfb and the X11/XTest runtime libraries installed, run:
+With Xvfb, PyYAML, and the X11/XTest runtime libraries installed, run:
 
 ```sh
 xvfb-run -a python scripts/smoke_test.py build/debug/billiards

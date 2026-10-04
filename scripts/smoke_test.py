@@ -3,11 +3,14 @@
 import ctypes
 import ctypes.util
 import os
+import math
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
+
+import yaml
 
 
 executable = Path(sys.argv[1]).resolve()
@@ -55,17 +58,50 @@ with tempfile.TemporaryDirectory(prefix="billiards-smoke-") as temporary:
 
             time.sleep(3)
             save()
-            for _ in range(2):
-                key(0xFFC6)  # F9
-                save()
-                time.sleep(1)  # Exercise gameplay ticks with restored bodies.
+            document = yaml.safe_load(scene.read_text())
+            app_state = document["application"]
+            cue_id = app_state["balls"][0]["id"]
+            pocketed_id = app_state["balls"][1]["id"]
+            for obj in document["objects"]:
+                obj["name"] = "Renamed object " + str(obj["id"])
+            bodies = {body["entity_id"]: body for body in document["ecs"]["physics_system"]["bodies"]}
+            bodies[cue_id]["linear_velocity"] = {"x": 0.65, "y": 0.0, "z": 0.0}
+            bodies[cue_id]["active"] = True
+            bodies[pocketed_id]["enabled"] = False
+            bodies[pocketed_id]["active"] = False
+            app_state["balls"][1]["pocketed"] = True
+            document["engine"]["paused"] = True
+            scene.write_text(yaml.safe_dump(document, sort_keys=False))
+
+            key(0xFFC6)  # Load the edited scene while paused.
+            save()
+            loaded = yaml.safe_load(scene.read_text())
+            assert all(obj["name"].startswith("Renamed object ") for obj in loaded["objects"])
+            assert loaded["application"]["balls"][1]["pocketed"] is True
+            loaded_bodies = {body["entity_id"]: body for body in loaded["ecs"]["physics_system"]["bodies"]}
+            assert math.isclose(loaded_bodies[cue_id]["linear_velocity"]["x"], 0.65, abs_tol=1e-6)
+            assert loaded_bodies[pocketed_id]["enabled"] is False
+
+            loaded["engine"]["paused"] = False
+            scene.write_text(yaml.safe_dump(loaded, sort_keys=False))
+            key(0xFFC6)
+            time.sleep(1)
+            save()
+            advanced = yaml.safe_load(scene.read_text())
+            advanced_transforms = {entry["entity_id"]: entry for entry in advanced["ecs"]["transformation_system"]}
+            loaded_transforms = {entry["entity_id"]: entry for entry in loaded["ecs"]["transformation_system"]}
+            advanced_x = advanced_transforms[cue_id]["local_transform"]["column_3"]["x"]
+            loaded_x = loaded_transforms[cue_id]["local_transform"]["column_3"]["x"]
+            assert advanced_x > loaded_x
+            key(0xFFC6)
+            save()
             key(0xFF1B)  # Escape
             app.wait(timeout=15)
             log.seek(0)
             output = log.read()
             if app.returncode != 0 or "Exception Thrown!" in output:
                 raise RuntimeError("App failed during scene load or shutdown")
-            print("PASS: scene save, repeated load, gameplay ticks, clean shutdown")
+            print("PASS: explicit app IDs, renamed objects, moving and pocketed bodies, repeated load")
         except Exception:
             log.seek(0)
             print(log.read()[-2000:], file=sys.stderr)

@@ -7,6 +7,7 @@
 #include <iapplication.hpp>
 #include <renderable/material.hpp>
 #include <renderable/mesh_factory.hpp>
+#include <serialization/serializer.hpp>
 #include <utility.hpp>
 
 #include <glm/gtc/quaternion.hpp>
@@ -19,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 
@@ -49,6 +51,7 @@ struct SpawnedObject
 {
 	ObjectID id;
 	glm::vec3 initial_position;
+	bool pocketed = false;
 };
 
 PbrMaterial make_material(const glm::vec3& color, const float roughness = 0.35f)
@@ -103,54 +106,82 @@ public:
 	void on_scene_loaded(GameEngine& engine) override
 	{
 		this->engine = &engine;
-		felt_id = required_object("Playing surface").get_id();
-		engine.get_ecs().add_rigid_body(*felt_id, static_box_definition(
-			{ TABLE_LENGTH * 0.5f, 0.07f, TABLE_WIDTH * 0.5f }));
-
-		std::size_t long_rails = 0;
-		std::size_t short_rails = 0;
-		for (const auto& [_, object] : engine.get_objects())
-		{
-			if (object->get_name() == "Long rail")
-			{
-				engine.get_ecs().add_rigid_body(object->get_id(), static_box_definition(
-				{ LONG_SEGMENT_LENGTH * 0.5f, RAIL_HEIGHT * 0.5f, RAIL_THICKNESS * 0.5f }));
-				++long_rails;
-			}
-			else if (object->get_name() == "Short rail")
-			{
-				engine.get_ecs().add_rigid_body(object->get_id(), static_box_definition(
-				{ RAIL_THICKNESS * 0.5f, RAIL_HEIGHT * 0.5f, SHORT_RAIL_LENGTH * 0.5f }));
-				++short_rails;
-			}
-		}
-		if (long_rails != 4 || short_rails != 2)
-			throw std::runtime_error("Billiards scene is missing required table rails");
-
-		balls.clear();
-		balls.reserve(16);
-		pocketed_balls = 0;
-		const auto restore_ball = [this](const std::string& name, const glm::vec3 initial_position)
-		{
-			auto& ball = required_object(name);
-			const bool enabled = this->engine->get_ecs().get_position(ball.get_id()).y >= 0.0f;
-			balls.push_back({ ball.get_id(), initial_position });
-			add_ball_body(ball.get_id(), enabled);
-			if (!enabled)
-				++pocketed_balls;
-		};
-		restore_ball("Cue ball", CUE_BALL_START);
-		for (int index = 1; index <= 15; ++index)
-			restore_ball("Object ball " + std::to_string(index), rack_position(index));
-		cue_id = required_object("Cue stick").get_id();
+		balls_at_rest = std::ranges::all_of(balls, [&engine](const SpawnedObject& ball) {
+			return !engine.get_ecs().is_body_enabled(ball.id) || !engine.get_ecs().is_body_active(ball.id);
+		});
 		set_cue_visible(false);
-		aim_direction = Maths::right_vec;
-
 		charging = false;
 		preview_power = 0.0f;
-		balls_at_rest = true;
+		aim_direction = Maths::right_vec;
 		ui_state.publish_power(0.0f);
 		ui_state.publish_status(balls_at_rest, pocketed_balls);
+	}
+
+	void serialize_scene(Serializer& out) const override
+	{
+		if (!felt_id || !table_id || !cue_id || rails.size() != 6 || balls.size() != 16)
+			throw std::runtime_error("Billiards gameplay state is incomplete");
+		out.write("felt_id", felt_id->get_underlying());
+		out.write("table_id", table_id->get_underlying());
+		out.write("cue_id", cue_id->get_underlying());
+		auto saved_rails = out.sequence("rail_ids");
+		for (const auto id : rails) saved_rails.append(id.get_underlying());
+		auto saved_balls = out.sequence("balls");
+		for (const auto& ball : balls) {
+			auto saved = saved_balls.append_map();
+			saved.write("id", ball.id.get_underlying());
+			saved.write("initial_x", ball.initial_position.x);
+			saved.write("initial_y", ball.initial_position.y);
+			saved.write("initial_z", ball.initial_position.z);
+			saved.write("pocketed", ball.pocketed);
+		}
+	}
+
+	void deserialize_scene(GameEngine& engine, const Deserializer& in) override
+	{
+		this->engine = &engine;
+		felt_id = required_id(in.read<std::uint64_t>("felt_id"));
+		table_id = required_id(in.read<std::uint64_t>("table_id"));
+		cue_id = required_id(in.read<std::uint64_t>("cue_id"));
+		auto saved_rails = in.child("rail_ids").elements();
+		if (saved_rails.size() != 6) throw SerializationError("Billiards save must contain six rails");
+		rails.clear();
+		for (const auto& saved : saved_rails) rails.push_back(required_id(saved.as<std::uint64_t>()));
+		auto saved_balls = in.child("balls").elements();
+		if (saved_balls.size() != 16) throw SerializationError("Billiards save must contain sixteen balls");
+		balls.clear();
+		pocketed_balls = 0;
+		for (const auto& saved : saved_balls) {
+			const auto id = required_id(saved.read<std::uint64_t>("id"));
+			const glm::vec3 initial{
+				saved.read<float>("initial_x"), saved.read<float>("initial_y"), saved.read<float>("initial_z") };
+			if (!std::isfinite(initial.x) || !std::isfinite(initial.y) || !std::isfinite(initial.z))
+				throw SerializationError("Billiards save contains an invalid ball reset position");
+			const bool pocketed = saved.read<bool>("pocketed");
+			if (!engine.get_ecs().has_rigid_body(id))
+				throw SerializationError("Billiards save ball is missing its restored rigid body");
+			if (pocketed && engine.get_ecs().is_body_enabled(id))
+				throw SerializationError("Billiards save pocketed flag does not match its restored body state");
+			if (std::ranges::any_of(balls, [id](const SpawnedObject& prior) { return prior.id == id; }))
+				throw SerializationError("Billiards save contains duplicate ball IDs");
+			balls.push_back({ id, initial, pocketed });
+			if (pocketed) ++pocketed_balls;
+		}
+		std::unordered_set<ObjectID> gameplay_ids{*felt_id, *table_id, *cue_id};
+		if (gameplay_ids.size() != 3)
+			throw SerializationError("Billiards save contains duplicate gameplay object IDs");
+		for (const auto id : rails)
+			if (!gameplay_ids.insert(id).second)
+				throw SerializationError("Billiards save contains duplicate gameplay object IDs");
+		for (const auto& ball : balls)
+			if (!gameplay_ids.insert(ball.id).second)
+				throw SerializationError("Billiards save contains duplicate gameplay object IDs");
+		for (const auto id : rails) {
+			if (!engine.get_ecs().has_rigid_body(id))
+				throw SerializationError("Billiards save rail is missing its restored rigid body");
+		}
+		if (!engine.get_ecs().has_rigid_body(*felt_id))
+			throw SerializationError("Billiards save felt is missing its restored rigid body");
 	}
 
 	void on_tick(GameEngine& engine, float delta_secs) override
@@ -162,7 +193,7 @@ public:
 			if (engine.get_ecs().is_body_enabled(ball.id)
 				&& engine.get_ecs().get_position(ball.id).y < 0.0f) {
 				engine.get_ecs().set_body_enabled(ball.id, false);
-				++pocketed_balls;
+				if (!ball.pocketed) { ball.pocketed = true; ++pocketed_balls; }
 			}
 		}
 		if (!engine.get_ecs().is_body_enabled(balls.front().id)
@@ -171,7 +202,8 @@ public:
 			})) {
 			engine.get_ecs().set_body_enabled(balls.front().id, true);
 			engine.get_ecs().teleport_body(balls.front().id, CUE_BALL_START);
-			if (pocketed_balls > 0) --pocketed_balls;
+			if (balls.front().pocketed && pocketed_balls > 0) --pocketed_balls;
+			balls.front().pocketed = false;
 		}
 		balls_at_rest = std::ranges::all_of(balls, [&engine](const SpawnedObject& ball) {
 			return !engine.get_ecs().is_body_enabled(ball.id) || !engine.get_ecs().is_body_active(ball.id);
@@ -300,8 +332,8 @@ private:
 
 	void spawn_table()
 	{
-		spawn_primitive(cube_mesh, wood_material, { 0.0f, 0.2f, 0.0f },
-			{ TABLE_LENGTH + 1.1f, 0.8f, TABLE_WIDTH + 1.1f }, "Table base");
+		table_id = spawn_primitive(cube_mesh, wood_material, { 0.0f, 0.2f, 0.0f },
+			{ TABLE_LENGTH + 1.1f, 0.8f, TABLE_WIDTH + 1.1f }, "Table base").get_id();
 		auto& felt = spawn_primitive(cube_mesh, felt_material, { 0.0f, 0.58f, 0.0f },
 			{ TABLE_LENGTH, 0.14f, TABLE_WIDTH }, "Playing surface");
 		felt_id = felt.get_id();
@@ -314,6 +346,7 @@ private:
 				auto& rail = spawn_primitive(cube_mesh, wood_material,
 					{ x, TABLE_SURFACE_Y + RAIL_HEIGHT * 0.5f, z },
 					{ LONG_SEGMENT_LENGTH, RAIL_HEIGHT, RAIL_THICKNESS }, "Long rail");
+				rails.push_back(rail.get_id());
 				add_static_box(rail.get_id(), {
 					LONG_SEGMENT_LENGTH * 0.5f, RAIL_HEIGHT * 0.5f, RAIL_THICKNESS * 0.5f });
 			}
@@ -322,6 +355,7 @@ private:
 			auto& rail = spawn_primitive(cube_mesh, wood_material,
 				{ x, TABLE_SURFACE_Y + RAIL_HEIGHT * 0.5f, 0.0f },
 				{ RAIL_THICKNESS, RAIL_HEIGHT, SHORT_RAIL_LENGTH }, "Short rail");
+			rails.push_back(rail.get_id());
 			add_static_box(rail.get_id(), {
 				RAIL_THICKNESS * 0.5f, RAIL_HEIGHT * 0.5f, SHORT_RAIL_LENGTH * 0.5f });
 		}
@@ -360,12 +394,12 @@ private:
 		engine->get_ecs().set_contact_restitution(id, *felt_id, 0.05f);
 	}
 
-	Object& required_object(const std::string_view name)
+	ObjectID required_id(const std::uint64_t value) const
 	{
-		for (const auto& [_, object] : engine->get_objects())
-			if (object->get_name() == name)
-				return *object;
-		throw std::runtime_error("Billiards scene is missing required object '" + std::string(name) + "'");
+		const ObjectID id(value);
+		if (!engine->get_object(id))
+			throw SerializationError("Billiards save refers to a missing object ID");
+		return id;
 	}
 
 	static glm::vec3 rack_position(const int ball_index)
@@ -450,10 +484,11 @@ private:
 
 	void reset_rack()
 	{
-		for (const auto& ball : balls)
+		for (auto& ball : balls)
 		{
 			engine->get_ecs().set_body_enabled(ball.id, true);
 			engine->get_ecs().teleport_body(ball.id, ball.initial_position);
+			ball.pocketed = false;
 		}
 		pocketed_balls = 0;
 		balls_at_rest = true;
@@ -511,7 +546,9 @@ private:
 	std::vector<MaterialHandle> ball_materials;
 	std::vector<SpawnedObject> balls;
 	std::optional<ObjectID> felt_id;
+	std::optional<ObjectID> table_id;
 	std::optional<ObjectID> cue_id;
+	std::vector<ObjectID> rails;
 	glm::vec3 aim_direction = Maths::right_vec;
 	glm::vec3 charge_origin{};
 	float preview_power = 0.0f;
