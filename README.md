@@ -29,7 +29,7 @@ meson compile -C /path/to/krisp/build/debug -j 6 krisp
 meson compile -C build/debug -j 6
 ```
 
-The Billiards build deploys the runtime beside the executable at `build/debug/krisp-runtime`. Run `build/debug/billiards` from any working directory. App-specific resources can be placed under `build/debug/resources/billiards`; writable config uses the platform's XDG config directory, and saves live under `$XDG_DATA_HOME/krisp/billiards/saves` (default `~/.local/share/krisp/billiards/saves`).
+The Billiards build deploys the runtime beside the executable at `build/debug/krisp-runtime`. Run `build/debug/billiards` from any working directory. App-specific resources can be placed under `build/debug/resources`; writable config uses the platform's XDG config directory, and saves live under `$XDG_DATA_HOME/krisp/billiards/saves` (default `~/.local/share/krisp/billiards/saves`).
 
 After intentional engine changes are ready for a package checkpoint, build `krisp/0.1.0` from the engine checkout. To consume that package instead of the editable checkout, remove the editable mapping with `conan editable remove --refs=krisp/0.1.0` and reinstall this application graph. Normal source edits should keep the same `0.1.0` reference and use editable mode.
 

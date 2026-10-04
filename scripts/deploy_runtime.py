@@ -33,7 +33,7 @@ def main() -> None:
         raise SystemExit(f"Krisp runtime directory does not exist: {runtime_source}")
 
     changed = copy_changed_files(runtime_source, build_directory / "krisp-runtime")
-    (build_directory / "resources" / "billiards").mkdir(parents=True, exist_ok=True)
+    (build_directory / "resources").mkdir(parents=True, exist_ok=True)
     stamp.parent.mkdir(parents=True, exist_ok=True)
     if changed or not stamp.exists():
         stamp.touch()

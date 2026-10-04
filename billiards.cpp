@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 
@@ -560,7 +561,9 @@ private:
 
 int main(int, char**)
 {
-	Config::init("billiards");
+	auto runtime_paths = Utility::paths_for_executable("billiards");
+	runtime_paths.app_resources = runtime_paths.app_resources.parent_path();
+	Config::init("billiards", std::move(runtime_paths));
 	auto engine = GameEngine::create<BilliardsApplication>();
 	engine.run();
 }
